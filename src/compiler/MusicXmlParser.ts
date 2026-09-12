@@ -114,4 +114,89 @@ export class MusicXmlParser {
     // A duplet (2 in the space of 3) occupies 3/2 times standard duration per note
     return Math.round(standardDuration * (normalNotes / actualNotes));
   }
+
+  /**
+   * Extracts <pedal type="start|stop|change"/> events from MusicXML
+   */
+  public static parsePedalDirections(
+    xmlString: string,
+    measureStartTime = 0
+  ): { id: string; time: number; type: 'down' | 'up' | 'change' }[] {
+    const events: { id: string; time: number; type: 'down' | 'up' | 'change' }[] = [];
+    const pedalRegex = /<pedal\s+[^>]*type=["'](start|stop|change)["'][^>]*\/>/gi;
+    let match: RegExpExecArray | null;
+    let idx = 1;
+
+    while ((match = pedalRegex.exec(xmlString)) !== null) {
+      const typeStr = match[1].toLowerCase();
+      const type = typeStr === 'start' ? 'down' : typeStr === 'stop' ? 'up' : 'change';
+      events.push({
+        id: `pedal-${idx++}-${measureStartTime}`,
+        time: measureStartTime,
+        type
+      });
+    }
+    return events;
+  }
+
+  /**
+   * Extracts <words> directions such as "con sordina", "una corda", "senza sordina", "tre corde"
+   */
+  public static parseTimbreDirections(
+    xmlString: string,
+    measureStartTime = 0
+  ): { id: string; time: number; unaCorda: boolean }[] {
+    const events: { id: string; time: number; unaCorda: boolean }[] = [];
+    const wordsRegex = /<words[^>]*>([\s\S]*?)<\/words>/gi;
+    let match: RegExpExecArray | null;
+    let idx = 1;
+
+    while ((match = wordsRegex.exec(xmlString)) !== null) {
+      const text = match[1].toLowerCase().trim();
+      if (text.includes('con sordina') || text.includes('una corda')) {
+        events.push({
+          id: `timbre-${idx++}-${measureStartTime}`,
+          time: measureStartTime,
+          unaCorda: true
+        });
+      } else if (text.includes('senza sordina') || text.includes('tre corde') || text.includes('toutes les cordes')) {
+        events.push({
+          id: `timbre-${idx++}-${measureStartTime}`,
+          time: measureStartTime,
+          unaCorda: false
+        });
+      }
+    }
+    return events;
+  }
+
+  /**
+   * Extracts <time> signature from measure XML
+   */
+  public static parseTimeSignature(measureXml: string): { beats: number; beatType: number } | null {
+    const beatsMatch = measureXml.match(/<beats>(\d+)<\/beats>/);
+    const typeMatch = measureXml.match(/<beat-type>(\d+)<\/beat-type>/);
+    if (beatsMatch && typeMatch) {
+      return {
+        beats: parseInt(beatsMatch[1], 10),
+        beatType: parseInt(typeMatch[1], 10)
+      };
+    }
+    return null;
+  }
+
+  /**
+   * Extracts tempo from <sound tempo="..."/> or <per-minute>
+   */
+  public static parseTempo(measureXml: string): number | null {
+    const soundMatch = measureXml.match(/<sound[^>]*tempo=["']([\d.]+)["']/i);
+    if (soundMatch) {
+      return parseFloat(soundMatch[1]);
+    }
+    const perMinMatch = measureXml.match(/<per-minute>([\d.]+)<\/per-minute>/i);
+    if (perMinMatch) {
+      return parseFloat(perMinMatch[1]);
+    }
+    return null;
+  }
 }

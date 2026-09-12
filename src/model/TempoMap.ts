@@ -1,18 +1,20 @@
-import type { TimingStrategy, TempoSection, AlignmentMarker } from '../types/index.js';
+import type { TimingStrategy, TempoSection, AlignmentMarker, ScoreData, MeasureMeta } from '../types/index.js';
 
 export class TempoMap {
   private strategy: TimingStrategy = 'rubato';
-  private nominalMeasureDur = 3.75; // 9/8 at 48 bpm = (60/48) * 3 = 3.75s
+  private nominalBpm = 48;
+  private nominalMeasureDur = 3.75;
   private totalMeasures = 72;
+  private measures: MeasureMeta[] = [];
 
-  // Curated Expressive Rubato Sections
+  // Configurable Expressive Rubato Sections
   private sections: TempoSection[] = [
-    { name: 'Theme A (Andante très expressif)', startMeasure: 1, endMeasure: 14, bpm: 43.5 },
-    { name: 'Tempo rubato Transition', startMeasure: 15, endMeasure: 26, bpm: 47.0 },
-    { name: 'Calmato (Arpeggios)', startMeasure: 27, endMeasure: 42, bpm: 48.5 },
-    { name: 'Animato Climax', startMeasure: 43, endMeasure: 50, bpm: 55.0 },
-    { name: 'Theme A Recapitulation', startMeasure: 51, endMeasure: 65, bpm: 45.0 },
-    { name: 'Coda & Final Chords (Ritardando)', startMeasure: 66, endMeasure: 72, bpm: 39.0 }
+    { name: 'Theme A', startMeasure: 1, endMeasure: 14, bpm: 43.5 },
+    { name: 'Transition', startMeasure: 15, endMeasure: 26, bpm: 47.0 },
+    { name: 'Middle Section', startMeasure: 27, endMeasure: 42, bpm: 48.5 },
+    { name: 'Climax', startMeasure: 43, endMeasure: 50, bpm: 55.0, curve: 'accelerando', tempoFactor: 4.0 },
+    { name: 'Recapitulation', startMeasure: 51, endMeasure: 65, bpm: 45.0 },
+    { name: 'Coda', startMeasure: 66, endMeasure: 72, bpm: 39.0, curve: 'ritardando', tempoFactor: 8.0 }
   ];
 
   // Optional external audio recording alignment markers (DTW / studio reference)
@@ -22,8 +24,32 @@ export class TempoMap {
   private measureStartsPerf: number[] = [];
   private totalPerfDuration = 270.0;
 
-  constructor(strategy: TimingStrategy = 'rubato') {
-    this.strategy = strategy;
+  constructor(scoreOrStrategy?: ScoreData | TimingStrategy, strategy: TimingStrategy = 'rubato') {
+    if (typeof scoreOrStrategy === 'string') {
+      this.strategy = scoreOrStrategy;
+    } else if (scoreOrStrategy) {
+      this.strategy = strategy;
+      this.initScoreData(scoreOrStrategy);
+      return;
+    } else {
+      this.strategy = strategy;
+    }
+    this.recompute();
+  }
+
+  public initScoreData(scoreData: ScoreData): void {
+    this.totalMeasures = scoreData.totalMeasures || 1;
+    this.nominalMeasureDur = scoreData.measureDuration || (scoreData.tempoBpm ? (60 / scoreData.tempoBpm) * 4 : 2.0);
+    this.nominalBpm = scoreData.tempoBpm || 120;
+    this.measures = scoreData.measures || [];
+
+    if (scoreData.tempoSections && scoreData.tempoSections.length > 0) {
+      this.sections = [...scoreData.tempoSections];
+    } else if (scoreData.tempoBpm) {
+      this.sections = [
+        { name: 'Default', startMeasure: 1, endMeasure: this.totalMeasures, bpm: this.nominalBpm }
+      ];
+    }
     this.recompute();
   }
 
@@ -43,14 +69,33 @@ export class TempoMap {
     }
   }
 
+  public getMeasureNominalDuration(m: number): number {
+    if (this.measures && this.measures.length >= m && this.measures[m - 1]) {
+      return this.measures[m - 1].durationSec;
+    }
+    return this.nominalMeasureDur;
+  }
+
+  public getMeasureNominalStart(m: number): number {
+    if (this.measures && this.measures.length > 0) {
+      if (m <= this.measures.length && this.measures[m - 1]) {
+        return this.measures[m - 1].startSec;
+      }
+      const lastMeta = this.measures[this.measures.length - 1];
+      const excess = m - this.measures.length - 1;
+      return lastMeta.startSec + lastMeta.durationSec + excess * this.nominalMeasureDur;
+    }
+    return (m - 1) * this.nominalMeasureDur;
+  }
+
   private recompute(): void {
     this.measureStartsPerf = new Array(this.totalMeasures + 2).fill(0);
 
     if (this.strategy === 'metronome') {
       for (let m = 1; m <= this.totalMeasures + 1; m++) {
-        this.measureStartsPerf[m] = (m - 1) * this.nominalMeasureDur;
+        this.measureStartsPerf[m] = this.getMeasureNominalStart(m);
       }
-      this.totalPerfDuration = this.totalMeasures * this.nominalMeasureDur;
+      this.totalPerfDuration = this.getMeasureNominalStart(this.totalMeasures + 1);
       return;
     }
 
@@ -75,26 +120,30 @@ export class TempoMap {
       return;
     }
 
-    // Default: Expressive Rubato Curve
+    // Default: Dynamic Rubato Curve scaled from nominal measure durations
     let currentPerfTime = 0;
     for (let m = 1; m <= this.totalMeasures; m++) {
       this.measureStartsPerf[m] = currentPerfTime;
       const sec = this.sections.find(s => m >= s.startMeasure && m <= s.endMeasure) || this.sections[0];
       
-      // Fine-grained micro-rubato within sections
       let bpmMod = sec.bpm;
-      if (sec.name === 'Animato Climax') {
-        // Accelerando towards climax at measure 47-48
-        const progress = (m - sec.startMeasure) / (sec.endMeasure - sec.startMeasure + 1);
+      const span = Math.max(1, sec.endMeasure - sec.startMeasure + 1);
+      const progress = (m - sec.startMeasure) / span;
+
+      if (sec.curve === 'accelerando') {
+        const factor = sec.tempoFactor ?? 4.0;
+        bpmMod = sec.bpm + Math.sin(progress * Math.PI) * factor;
+      } else if (sec.curve === 'ritardando') {
+        const factor = sec.tempoFactor ?? 8.0;
+        bpmMod = sec.bpm - progress * factor;
+      } else if (sec.name.includes('Animato') || sec.name.includes('Climax')) {
         bpmMod = sec.bpm + Math.sin(progress * Math.PI) * 4.0;
       } else if (sec.name.includes('Coda')) {
-        // Gradual ritardando into the pianissimo resolution
-        const progress = (m - sec.startMeasure) / (sec.endMeasure - sec.startMeasure + 1);
         bpmMod = sec.bpm - progress * 8.0;
       }
 
-      const beatDur = 60 / Math.max(25, bpmMod);
-      const measureDur = beatDur * 3; // 3 dotted-quarter beats in 9/8
+      const nominalM = this.getMeasureNominalDuration(m);
+      const measureDur = nominalM * (this.nominalBpm / Math.max(20, bpmMod));
       currentPerfTime += measureDur;
     }
     this.measureStartsPerf[this.totalMeasures + 1] = currentPerfTime;
@@ -102,22 +151,41 @@ export class TempoMap {
   }
 
   /**
-   * Convert nominal score time (at 48bpm, 3.75s per measure) to performance seconds
+   * Convert nominal score time to performance seconds
    */
   public scoreTimeToPerfTime(scoreSec: number): number {
     if (this.strategy === 'metronome') return scoreSec;
+    if (scoreSec <= 0) return 0;
 
-    // Nominal measure index
-    const mFloat = 1 + scoreSec / this.nominalMeasureDur;
-    const mBase = Math.floor(mFloat);
-    const mFrac = mFloat - mBase;
+    let m = 1;
+    if (this.measures && this.measures.length > 0) {
+      let low = 1;
+      let high = this.totalMeasures;
+      while (low <= high) {
+        const mid = Math.floor((low + high) / 2);
+        const meta = this.measures[mid - 1];
+        if (meta && meta.startSec <= scoreSec) {
+          m = mid;
+          low = mid + 1;
+        } else {
+          high = mid - 1;
+        }
+      }
+    } else {
+      const mFloat = 1 + scoreSec / this.nominalMeasureDur;
+      m = Math.floor(mFloat);
+    }
 
-    if (mBase < 1) return 0;
-    if (mBase > this.totalMeasures) return this.totalPerfDuration;
+    if (m < 1) return 0;
+    if (m > this.totalMeasures) return this.totalPerfDuration;
 
-    const mStart = this.measureStartsPerf[mBase];
-    const mNext = this.measureStartsPerf[mBase + 1] || (mStart + this.nominalMeasureDur);
-    return mStart + mFrac * (mNext - mStart);
+    const mNomStart = this.getMeasureNominalStart(m);
+    const mNomDur = this.getMeasureNominalDuration(m);
+    const mFrac = Math.min(1.0, Math.max(0.0, (scoreSec - mNomStart) / Math.max(0.001, mNomDur)));
+
+    const mStartPerf = this.measureStartsPerf[m];
+    const mNextPerf = this.measureStartsPerf[m + 1] || (mStartPerf + mNomDur);
+    return mStartPerf + mFrac * (mNextPerf - mStartPerf);
   }
 
   /**
@@ -126,7 +194,10 @@ export class TempoMap {
   public perfTimeToScoreTime(perfSec: number): number {
     if (this.strategy === 'metronome') return perfSec;
     if (perfSec <= 0) return 0;
-    if (perfSec >= this.totalPerfDuration) return this.totalMeasures * this.nominalMeasureDur;
+    if (perfSec >= this.totalPerfDuration) {
+      const lastM = this.totalMeasures;
+      return this.getMeasureNominalStart(lastM) + this.getMeasureNominalDuration(lastM);
+    }
 
     // Binary search for measure in measureStartsPerf
     let low = 1;
@@ -144,10 +215,12 @@ export class TempoMap {
     }
 
     const mStart = this.measureStartsPerf[m];
-    const mNext = this.measureStartsPerf[m + 1] || (mStart + this.nominalMeasureDur);
+    const mNext = this.measureStartsPerf[m + 1] || (mStart + this.getMeasureNominalDuration(m));
     const frac = Math.min(1.0, Math.max(0.0, (perfSec - mStart) / Math.max(0.001, mNext - mStart)));
 
-    return (m - 1) * this.nominalMeasureDur + frac * this.nominalMeasureDur;
+    const mNomStart = this.getMeasureNominalStart(m);
+    const mNomDur = this.getMeasureNominalDuration(m);
+    return mNomStart + frac * mNomDur;
   }
 
   public getMeasureStartPerf(m: number): number {
@@ -163,3 +236,4 @@ export class TempoMap {
     return this.sections;
   }
 }
+

@@ -21,11 +21,10 @@ export class Scheduler {
   private startPerfOffset = 0;
   private lastScheduledPerfTime = 0;
 
-  // Track scheduled notes to prevent duplicate queuing
+  // Track scheduled events to prevent duplicate queuing
   private scheduledNoteIds = new Set<string>();
-
-  // Track measure barlines for proactive damping
-  private scheduledBarlineMeasures = new Set<number>();
+  private scheduledPedalEventIds = new Set<string>();
+  private scheduledTimbreEventIds = new Set<string>();
 
   constructor(audioEngine: AudioEngine, scoreModel: ScoreModel) {
     this.audioEngine = audioEngine;
@@ -62,17 +61,26 @@ export class Scheduler {
     this.startPerfOffset = fromPerfTime;
     this.lastScheduledPerfTime = fromPerfTime;
     this.scheduledNoteIds.clear();
+    this.scheduledPedalEventIds.clear();
+    this.scheduledTimbreEventIds.clear();
 
-    // Mark measures prior to fromPerfTime as already damped
-    this.scheduledBarlineMeasures.clear();
-    const startScoreTime = this.scoreModel.tempoMap.perfTimeToScoreTime(fromPerfTime);
-    const startMeasure = Math.floor(startScoreTime / this.scoreModel.data.measureDuration) + 1;
-    for (let m = 1; m <= startMeasure; m++) {
-      this.scheduledBarlineMeasures.add(m);
+    // Mark events prior to fromPerfTime as already scheduled
+    const startScore = this.scoreModel.tempoMap.perfTimeToScoreTime(fromPerfTime);
+    if (this.scoreModel.data.pedalEvents) {
+      for (const ev of this.scoreModel.data.pedalEvents) {
+        if (ev.time < startScore) this.scheduledPedalEventIds.add(ev.id);
+      }
+    }
+    if (this.scoreModel.data.timbreEvents) {
+      for (const ev of this.scoreModel.data.timbreEvents) {
+        if (ev.time < startScore) this.scheduledTimbreEventIds.add(ev.id);
+      }
     }
 
-    // Debussy's Clair de lune starts with sustain pedal engaged
-    this.audioEngine.setPedal(true, ctx.currentTime);
+    // Set initial pedal and timbre state dynamically from seek state
+    const seekState = this.scoreModel.getSeekState(fromPerfTime);
+    this.audioEngine.setPedal(seekState.pedalActive, ctx.currentTime);
+    this.audioEngine.setUnaCorda(seekState.unaCordaActive, ctx.currentTime);
 
     // Initial immediate scheduling burst
     this.scheduleLookahead();
@@ -92,7 +100,8 @@ export class Scheduler {
     }
     this.audioEngine.stopAll();
     this.scheduledNoteIds.clear();
-    this.scheduledBarlineMeasures.clear();
+    this.scheduledPedalEventIds.clear();
+    this.scheduledTimbreEventIds.clear();
     return currentPerf;
   }
 
@@ -104,13 +113,20 @@ export class Scheduler {
     this.startPerfOffset = toPerfTime;
     this.lastScheduledPerfTime = toPerfTime;
     this.scheduledNoteIds.clear();
-    this.scheduledBarlineMeasures.clear();
+    this.scheduledPedalEventIds.clear();
+    this.scheduledTimbreEventIds.clear();
     this.audioEngine.stopAll();
 
-    const startScoreTime = this.scoreModel.tempoMap.perfTimeToScoreTime(toPerfTime);
-    const startMeasure = Math.floor(startScoreTime / this.scoreModel.data.measureDuration) + 1;
-    for (let m = 1; m <= startMeasure; m++) {
-      this.scheduledBarlineMeasures.add(m);
+    const startScore = this.scoreModel.tempoMap.perfTimeToScoreTime(toPerfTime);
+    if (this.scoreModel.data.pedalEvents) {
+      for (const ev of this.scoreModel.data.pedalEvents) {
+        if (ev.time < startScore) this.scheduledPedalEventIds.add(ev.id);
+      }
+    }
+    if (this.scoreModel.data.timbreEvents) {
+      for (const ev of this.scoreModel.data.timbreEvents) {
+        if (ev.time < startScore) this.scheduledTimbreEventIds.add(ev.id);
+      }
     }
 
     const seekState = this.scoreModel.getSeekState(toPerfTime);
@@ -159,7 +175,7 @@ export class Scheduler {
 
   /**
    * The Hardware Lookahead Queue:
-   * Finds all notes in [lastScheduledPerfTime, windowEndPerfTime) and schedules them on the hardware clock.
+   * Finds all notes and events in [lastScheduledPerfTime, windowEndPerfTime) and schedules them on the hardware clock.
    */
   private scheduleLookahead(): void {
     const ctx = this.audioEngine.getContext();
@@ -193,21 +209,26 @@ export class Scheduler {
       }
     }
 
-    // 2. Proactive Barline Damper Scheduling
-    const totalMeasures = this.scoreModel.data.totalMeasures;
-    for (let m = 2; m <= totalMeasures; m++) {
-      if (this.scheduledBarlineMeasures.has(m)) continue;
+    // 2. Data-Driven Pedal Event Scheduling
+    const pedalEvents = this.scoreModel.getPedalEventsInPerfWindow(this.lastScheduledPerfTime, windowEndPerf);
+    for (const ev of pedalEvents) {
+      if (this.scheduledPedalEventIds.has(ev.id)) continue;
+      this.scheduledPedalEventIds.add(ev.id);
 
-      const barlinePerf = this.scoreModel.tempoMap.getMeasureStartPerf(m);
-      if (barlinePerf >= currentPerf && barlinePerf < windowEndPerf) {
-        this.scheduledBarlineMeasures.add(m);
+      const evPerfTime = this.scoreModel.tempoMap.scoreTimeToPerfTime(ev.time);
+      const hwDelta = (evPerfTime - this.startPerfOffset) / this.playbackSpeed;
+      const targetHwTime = Math.max(currentHw, this.anchorHwTime + hwDelta);
 
-        const hwDelta = (barlinePerf - this.startPerfOffset) / this.playbackSpeed;
-        const barlineHwTime = this.anchorHwTime + hwDelta;
-
-        // Clean barline damper clearing: lift pedal at barline, re-engage 80ms later
-        const damperLiftHwTime = Math.max(currentHw, barlineHwTime);
-        const damperReengageHwTime = barlineHwTime + 0.08;
+      if (ev.type === 'down') {
+        this.audioEngine.setPedal(true, targetHwTime);
+        for (const cb of this.callbacks) cb.onPedalChange(true, targetHwTime);
+      } else if (ev.type === 'up') {
+        this.audioEngine.setPedal(false, targetHwTime);
+        for (const cb of this.callbacks) cb.onPedalChange(false, targetHwTime);
+      } else if (ev.type === 'change') {
+        // Momentary pedal lift then re-engagement
+        const damperLiftHwTime = Math.max(currentHw, targetHwTime);
+        const damperReengageHwTime = targetHwTime + 0.08;
 
         this.audioEngine.setPedal(false, damperLiftHwTime);
         this.audioEngine.setPedal(true, damperReengageHwTime);
@@ -219,11 +240,18 @@ export class Scheduler {
       }
     }
 
-    // 3. Dynamic Una Corda (con sordina) Check
-    const currentScoreTime = this.scoreModel.tempoMap.perfTimeToScoreTime(currentPerf);
-    const activeMeasure = Math.floor(currentScoreTime / this.scoreModel.data.measureDuration) + 1;
-    const isUnaCorda = (activeMeasure <= 14) || (activeMeasure >= 66);
-    this.audioEngine.setUnaCorda(isUnaCorda, currentHw);
+    // 3. Data-Driven Timbre (Una Corda / Soft Pedal) Scheduling
+    const timbreEvents = this.scoreModel.getTimbreEventsInPerfWindow(this.lastScheduledPerfTime, windowEndPerf);
+    for (const ev of timbreEvents) {
+      if (this.scheduledTimbreEventIds.has(ev.id)) continue;
+      this.scheduledTimbreEventIds.add(ev.id);
+
+      const evPerfTime = this.scoreModel.tempoMap.scoreTimeToPerfTime(ev.time);
+      const hwDelta = (evPerfTime - this.startPerfOffset) / this.playbackSpeed;
+      const targetHwTime = Math.max(currentHw, this.anchorHwTime + hwDelta);
+
+      this.audioEngine.setUnaCorda(ev.unaCorda, targetHwTime);
+    }
 
     this.lastScheduledPerfTime = windowEndPerf;
 

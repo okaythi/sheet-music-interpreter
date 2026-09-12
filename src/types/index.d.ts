@@ -41,6 +41,28 @@ export interface ScoreSystem {
   endSec: number;
 }
 
+export interface MeasureMeta {
+  index: number;
+  timeSig: string;
+  startSec: number;
+  durationSec: number;
+  bpm?: number;
+}
+
+export type PedalEventType = 'down' | 'up' | 'change';
+
+export interface PedalEvent {
+  id: string;
+  time: number;
+  type: PedalEventType;
+}
+
+export interface TimbreEvent {
+  id: string;
+  time: number;
+  unaCorda: boolean;
+}
+
 export interface ScoreData {
   title: string;
   composer: string;
@@ -53,6 +75,10 @@ export interface ScoreData {
   totalSystems: number;
   systems: ScoreSystem[];
   notes: ScoreNote[];
+  measures?: MeasureMeta[];
+  pedalEvents?: PedalEvent[];
+  timbreEvents?: TimbreEvent[];
+  tempoSections?: TempoSection[];
 }
 
 export type TimingStrategy = 'rubato' | 'metronome' | 'dtw';
@@ -62,6 +88,8 @@ export interface TempoSection {
   startMeasure: number;
   endMeasure: number;
   bpm: number;
+  curve?: 'accelerando' | 'ritardando' | 'steady';
+  tempoFactor?: number;
   rubatoFactor?: number;
 }
 

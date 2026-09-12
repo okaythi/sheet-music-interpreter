@@ -24,6 +24,12 @@ const MOCK_SCORE_DATA: ScoreData = {
     { id: "n4", mn: 2, system: 1, staff: "upper", voice: 1, pitch: "Db5", octave: 5, midi: 73, start: 3.75, end: 5.0, dur: 1.25, x: 431, y: 44, stemUp: true, isOpen: false, hasDot: true, tied: "", clef: "G", ledgers: [] },
     { id: "n5", mn: 3, system: 2, staff: "lower", voice: 1, pitch: "F4", octave: 4, midi: 65, start: 7.5, end: 10.0, dur: 2.5, x: 168, y: 160, stemUp: true, isOpen: true, hasDot: true, tied: "", clef: "G", ledgers: [] },
     { id: "n6", mn: 4, system: 2, staff: "upper", voice: 1, pitch: "Bb4", octave: 4, midi: 70, start: 11.25, end: 12.5, dur: 1.25, x: 592, y: 52, stemUp: true, isOpen: false, hasDot: true, tied: "", clef: "G", ledgers: [] }
+  ],
+  pedalEvents: [
+    { id: "p1", time: 0.0, type: "down" }
+  ],
+  timbreEvents: [
+    { id: "t1", time: 0.0, unaCorda: true }
   ]
 };
 

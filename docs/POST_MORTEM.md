@@ -175,3 +175,31 @@ When a pianist lifts the damper pedal at a barline:
    - Barlines occurring in `[currentPerf, windowEndPerf)` are scheduled ahead of time:
      `audioEngine.setPedal(false, barlineHwTime)` cleanly clears previous measures' ringing strings, while beat 1 notes striking at `barlineHwTime` remain fully protected by key-held immunity.
    - At `barlineHwTime + 0.08`, the pedal is re-engaged for the new bar.
+
+---
+
+## 11. Universal Data-Driven Engine Architecture: Purging Song-Specific Heuristics
+
+### What Happened
+During early rapid prototyping of *Clair de lune*, piece-specific assumptions leaked directly into the core engine classes:
+- `Scheduler.ts` hardcoded an automatic damper release on every barline $M \in [2 \dots 72]$, hardcoded initial pedal depression at playback start, and hardcoded Debussy's soft pedal measures (`activeMeasure <= 14 || activeMeasure >= 66`).
+- `ScoreModel.ts` hardcoded `pedalActive = perfTime >= 0.4` and `unaCordaActive = (m <= 14 || m >= 66)`.
+- `TempoMap.ts` hardcoded `nominalMeasureDur = 3.75` (9/8 at 48 BPM), `totalMeasures = 72`, and a static array of movement titles.
+
+This tightly coupled the engine to a single piece, violating the foundational library-grade architecture required to support *any* MusicXML composition (such as dry Bach Inventions in 4/4 or multi-meter modern works).
+
+### The Fix: Generic Performance Event Streams
+1. **Generic Event Model (`src/types/index.d.ts`):**
+   - Introduced discrete `PedalEvent { id, time, type: 'down' | 'up' | 'change' }`.
+   - Introduced discrete `TimbreEvent { id, time, unaCorda: boolean }`.
+   - Introduced `MeasureMeta { index, timeSig, startSec, durationSec, bpm }`.
+2. **Purely Data-Driven Scheduling (`Scheduler.ts` & `ScoreModel.ts`):**
+   - The scheduler queries `scoreModel.getPedalEventsInPerfWindow()` and `scoreModel.getTimbreEventsInPerfWindow()`.
+   - Dry pieces with no pedal markings remain completely dry.
+   - Initial state on playback start or seek is resolved from the event streams dynamically.
+3. **Dynamic Universal `TempoMap` (`TempoMap.ts`):**
+   - Initializes from any `ScoreData`.
+   - Supports mixed and non-uniform measure durations: measure duration scales dynamically as $D_{\text{perf}} = D_{\text{nom}} \times (B_{\text{nom}} / B_{\text{mod}})$.
+   - Replaced piece-specific string matching with generic curve evaluation (`sec.curve === 'accelerando' | 'ritardando'`).
+4. **Verified Generality:**
+   - Added comprehensive test suite ([`test/universal-engine.test.ts`](file:///home/thy/Projects/sheet-music-interpreter/test/universal-engine.test.ts)) verifying dry Baroque pieces, mixed-meter pieces (3/4 $\leftrightarrow$ 4/4), and data-driven pedal/timbre streams. All 17 unit tests pass cleanly.

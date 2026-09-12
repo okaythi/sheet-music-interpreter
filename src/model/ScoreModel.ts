@@ -1,4 +1,4 @@
-import type { ScoreData, ScoreNote, ScoreSystem, SeekState } from '../types/index.js';
+import type { ScoreData, ScoreNote, ScoreSystem, SeekState, PedalEvent, TimbreEvent } from '../types/index.js';
 import { TempoMap } from './TempoMap.js';
 
 export class ScoreModel {
@@ -9,9 +9,14 @@ export class ScoreModel {
   private notesSortedByStart: ScoreNote[] = [];
   private notesBySystem: Map<number, ScoreNote[]> = new Map();
 
+  // Generic data-driven performance streams
+  private pedalEventsSorted: PedalEvent[] = [];
+  private timbreEventsSorted: TimbreEvent[] = [];
+
   constructor(scoreData: ScoreData, tempoMap?: TempoMap) {
     this.data = scoreData;
-    this.tempoMap = tempoMap || new TempoMap('rubato');
+    this.tempoMap = tempoMap || new TempoMap(scoreData, 'rubato');
+    this.tempoMap.initScoreData(scoreData);
     this.init();
   }
 
@@ -28,6 +33,14 @@ export class ScoreModel {
       if (list) {
         list.push(note);
       }
+    }
+
+    // Sort pedal and timbre events if present in score data
+    if (this.data.pedalEvents) {
+      this.pedalEventsSorted = [...this.data.pedalEvents].sort((a, b) => a.time - b.time);
+    }
+    if (this.data.timbreEvents) {
+      this.timbreEventsSorted = [...this.data.timbreEvents].sort((a, b) => a.time - b.time);
     }
   }
 
@@ -94,6 +107,28 @@ export class ScoreModel {
   }
 
   /**
+   * Lookahead query: Find pedal events within [startPerfSec, endPerfSec)
+   */
+  public getPedalEventsInPerfWindow(startPerfSec: number, endPerfSec: number): PedalEvent[] {
+    const startScore = this.tempoMap.perfTimeToScoreTime(startPerfSec);
+    const endScore = this.tempoMap.perfTimeToScoreTime(endPerfSec);
+    if (startScore >= endScore || this.pedalEventsSorted.length === 0) return [];
+
+    return this.pedalEventsSorted.filter(ev => ev.time >= startScore && ev.time < endScore);
+  }
+
+  /**
+   * Lookahead query: Find timbre events within [startPerfSec, endPerfSec)
+   */
+  public getTimbreEventsInPerfWindow(startPerfSec: number, endPerfSec: number): TimbreEvent[] {
+    const startScore = this.tempoMap.perfTimeToScoreTime(startPerfSec);
+    const endScore = this.tempoMap.perfTimeToScoreTime(endPerfSec);
+    if (startScore >= endScore || this.timbreEventsSorted.length === 0) return [];
+
+    return this.timbreEventsSorted.filter(ev => ev.time >= startScore && ev.time < endScore);
+  }
+
+  /**
    * State Reconstruction on Seek:
    * Returns exact active sounding note IDs, active pitches, pedal state, and system ID at any timestamp T.
    */
@@ -113,12 +148,23 @@ export class ScoreModel {
       }
     }
 
-    // Pedal is active in Clair de lune throughout (with barline dampers)
-    const pedalActive = perfTime >= 0.4 && perfTime < this.tempoMap.getTotalPerfDuration();
-    
-    // Con Sordina (soft pedal) is marked pp con sordina in Theme A (Bars 1-14) and Coda (Bars 66-72)
-    const currentMeasure = Math.floor(scoreTime / this.data.measureDuration) + 1;
-    const unaCordaActive = (currentMeasure >= 1 && currentMeasure <= 14) || (currentMeasure >= 66);
+    // Purely data-driven pedal state from score events
+    let pedalActive = false;
+    if (this.pedalEventsSorted.length > 0) {
+      for (const ev of this.pedalEventsSorted) {
+        if (ev.time > scoreTime) break;
+        pedalActive = ev.type === 'down' || ev.type === 'change';
+      }
+    }
+
+    // Purely data-driven timbre (una corda / soft pedal) state from score events
+    let unaCordaActive = false;
+    if (this.timbreEventsSorted.length > 0) {
+      for (const ev of this.timbreEventsSorted) {
+        if (ev.time > scoreTime) break;
+        unaCordaActive = ev.unaCorda;
+      }
+    }
 
     return {
       time: perfTime,

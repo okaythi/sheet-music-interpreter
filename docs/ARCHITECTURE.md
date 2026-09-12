@@ -42,24 +42,26 @@ The **Sheet Music Interpreter** is a zero-dependency, library-grade classical no
 ### 2.1 Model Layer (`src/model/`)
 
 * **`ScoreModel.ts`**:
-  * In-memory index of 1,680 notes sorted by nominal score start time.
+  * In-memory index of notes sorted by nominal score start time.
   * System-partitioned note buckets (`getNotesForSystem(sysId)`) for instant system switching.
   * Logarithmic lookahead querying via binary search (`getNotesInPerfWindow(start, end)`).
-  * State reconstruction on arbitrary seek: returns active sounding pitches, voice handles, and pedal states without scanning the entire score.
+  * Data-driven event stream indexing: `getPedalEventsInPerfWindow` and `getTimbreEventsInPerfWindow`.
+  * State reconstruction on arbitrary seek: computes exact active sounding notes, pedal states, and timbre settings dynamically from the score's event streams without hardcoded song heuristics.
 * **`TempoMap.ts`**:
-  * Decouples notational time from performance time.
+  * Decouples notational time from performance time generically for any piece, time signature, or tempo.
+  * Supports dynamic measure boundaries (`measures: MeasureMeta[]`), accommodating mixed and alternating meters (e.g. 3/4 to 4/4).
   * Supports three interchangeable timing strategies:
-    1. **Expressive Rubato:** Piecewise tempo curves modeled on Debussy's formal indications (Andante très expressif $\to$ Rubato $\to$ Calmato $\to$ Animato Climax $\to$ Recap $\to$ Coda ritardando).
-    2. **Strict Metronome:** Fixed 48 BPM ($3.75\text{s}$ per measure, $270.0\text{s}$ total).
+    1. **Expressive Rubato:** Evaluates generic section curves (`accelerando`, `ritardando`, `steady`) scaled dynamically from nominal measure durations: $D_{\text{perf}} = D_{\text{nom}} \times (B_{\text{nom}} / B_{\text{mod}})$.
+    2. **Strict Metronome:** Clockwork playback where performance seconds match score time across all measures.
     3. **DTW Alignment:** Piecewise linear time-warp against real studio recordings.
 
 ### 2.2 Audio Layer (`src/audio/`)
 
 * **`Scheduler.ts` (The Two-Clock Engine):**
-  * Operates a 25ms `setInterval` lookahead loop querying notes $120\text{ms}$ into the future.
+  * Operates a 25ms `setInterval` lookahead loop querying notes, pedal events, and timbre events $120\text{ms}$ into the future.
   * Calculates exact hardware timestamps:
-    $$\text{hwTime} = \text{anchorHwTime} + \frac{\text{notePerfStart} - \text{startPerfOffset}}{\text{playbackSpeed}}$$
-  * **Proactive Lookahead Barline Damper:** Rather than reactive measure polling, barlines within the lookahead window are queued with exact hardware timestamps. Pedal lift clears previous measures at the barline while re-engaging 80ms later.
+    $$\text{hwTime} = \text{anchorHwTime} + \frac{\text{eventPerfTime} - \text{startPerfOffset}}{\text{playbackSpeed}}$$
+  * **Data-Driven Event Dispatch:** Schedules `setPedal` and `setUnaCorda` strictly from score event streams (`PedalEvent` and `TimbreEvent`), eliminating hardcoded song-specific loops or measure bounds. Dry pieces remain unpedaled.
   * Compensates for `AudioContext.outputLatency` (Bluetooth/OS buffer delays) so visual playheads match acoustic sound arriving at the listener's ears.
 * **`VoiceBus.ts` (Acoustic Authority):**
   * **Damper Bus & Key-Held Immunity:** Models acoustic grand piano key levers vs damper rail. When the sustain pedal lifts, `releaseDamperHeldVoices` damps *only* strings whose keys have already been released by the fingers (`audioTime >= keyReleaseTime - 0.02`). Active notes and upcoming beat 1 chords are physically immune to barline damper lifts and continue ringing.
