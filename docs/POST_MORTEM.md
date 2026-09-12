@@ -132,3 +132,46 @@ The voice envelope ($0.85 \to 0.38$) compounded multiplicatively across the damp
 
 ### The Fix
 Introduced standard conversion `dbToGain(db) = 10^(db/20)`, calibrated una corda attenuation to a gentle $-2.2\text{dB}$, tuned filter cutoff to $2.8\text{kHz}$, and raised voice envelope attack peak to $0.92$ and sustain shelf to $0.48$.
+
+---
+
+## 10. The Beat 1 Note-Cutoff Defect: Barline Damper vs Key-Held Immunity
+
+### What Happened
+During playback, users observed that the first note of each measure was playing for only double-digit milliseconds (~90ms) before abruptly cutting off.
+
+Investigation into the signal and scheduling chains revealed two compounding bugs:
+
+1. **Reactive vs Proactive Barline Scheduling:**
+   In `Scheduler.ts`, measure barline detection was reactive (`if (activeMeasure !== this.lastDampedMeasure)`). By the time the playback cursor crossed into a new measure, the beat 1 notes had already been scheduled into the future (or at current hardware time) within the 120ms lookahead window with `isPedalHeld = true`.
+2. **Missing Key-Held Immunity in `VoiceBus.ts`:**
+   When the barline damper triggered `audioEngine.setPedal(false, damperHwTime)`, `VoiceBus.releaseDamperHeldVoices()` checked only `if (v.isPedalHeld)`. It immediately applied an exponential ramp down to `0.0001` over `clampTime = audioTime + 0.09` (90ms) and scheduled `v.src.stop(clampTime + 0.01)` on **every single active voice** in the bus.
+   Because the beat 1 notes of the new bar had already been allocated with `isPedalHeld = true`, their gain envelope was canceled and ramped down to zero within 90ms.
+
+### The Physical Acoustic Reality
+On an acoustic grand piano, there are two distinct mechanisms holding a damper off a string:
+- **Mechanism A (The Key Lever):** The pianist's finger physically presses the key down. The key lever holds the damper off the string.
+- **Mechanism B (The Damper Pedal Rail):** The foot pedal rotates a common lifting rail, holding dampers off all strings simultaneously.
+
+When a pianist lifts the damper pedal at a barline:
+- **Key-Released Notes:** Any string whose key has already been released is held up *only* by the pedal rail. When the rail drops, the felt damper drops onto the string, silencing it in ~90ms.
+- **Key-Held Notes:** Any string whose key is physically held down by the pianist's finger **CANNOT** be damped. The key lever continues to hold the damper in the air regardless of what the pedal does.
+- **Upcoming Notes:** Notes that start at or after the barline have not yet finished their finger-strike.
+
+### The Fix: Two-Pronged Acoustic Protection
+1. **Key-Held Immunity in `VoiceBus.ts`:**
+   - Added `keyReleaseTime = audioTime + durationSec` to `ActiveVoice`.
+   - In `releaseDamperHeldVoices(audioTime)`:
+     ```typescript
+     if (audioTime <= v.startTime || audioTime < v.keyReleaseTime - 0.02) {
+       // Key is physically held down (or note starts in future):
+       // Damper pedal release has ZERO effect on this string!
+       continue;
+     }
+     ```
+   - Only voices where `audioTime >= v.keyReleaseTime - 0.02` (notes whose keys were released in the past, ringing solely on pedal sustain) are damped.
+2. **Proactive Lookahead Barline Scheduling in `Scheduler.ts`:**
+   - Converted barline damping from reactive polling to proactive lookahead queueing in `scheduleLookahead()`.
+   - Barlines occurring in `[currentPerf, windowEndPerf)` are scheduled ahead of time:
+     `audioEngine.setPedal(false, barlineHwTime)` cleanly clears previous measures' ringing strings, while beat 1 notes striking at `barlineHwTime` remain fully protected by key-held immunity.
+   - At `barlineHwTime + 0.08`, the pedal is re-engaged for the new bar.

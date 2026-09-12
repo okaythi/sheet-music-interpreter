@@ -24,8 +24,8 @@ export class Scheduler {
   // Track scheduled notes to prevent duplicate queuing
   private scheduledNoteIds = new Set<string>();
 
-  // Track measure barlines for damping
-  private lastDampedMeasure = -1;
+  // Track measure barlines for proactive damping
+  private scheduledBarlineMeasures = new Set<number>();
 
   constructor(audioEngine: AudioEngine, scoreModel: ScoreModel) {
     this.audioEngine = audioEngine;
@@ -62,7 +62,17 @@ export class Scheduler {
     this.startPerfOffset = fromPerfTime;
     this.lastScheduledPerfTime = fromPerfTime;
     this.scheduledNoteIds.clear();
-    this.lastDampedMeasure = Math.floor(this.scoreModel.tempoMap.perfTimeToScoreTime(fromPerfTime) / this.scoreModel.data.measureDuration);
+
+    // Mark measures prior to fromPerfTime as already damped
+    this.scheduledBarlineMeasures.clear();
+    const startScoreTime = this.scoreModel.tempoMap.perfTimeToScoreTime(fromPerfTime);
+    const startMeasure = Math.floor(startScoreTime / this.scoreModel.data.measureDuration) + 1;
+    for (let m = 1; m <= startMeasure; m++) {
+      this.scheduledBarlineMeasures.add(m);
+    }
+
+    // Debussy's Clair de lune starts with sustain pedal engaged
+    this.audioEngine.setPedal(true, ctx.currentTime);
 
     // Initial immediate scheduling burst
     this.scheduleLookahead();
@@ -82,6 +92,7 @@ export class Scheduler {
     }
     this.audioEngine.stopAll();
     this.scheduledNoteIds.clear();
+    this.scheduledBarlineMeasures.clear();
     return currentPerf;
   }
 
@@ -93,7 +104,21 @@ export class Scheduler {
     this.startPerfOffset = toPerfTime;
     this.lastScheduledPerfTime = toPerfTime;
     this.scheduledNoteIds.clear();
+    this.scheduledBarlineMeasures.clear();
     this.audioEngine.stopAll();
+
+    const startScoreTime = this.scoreModel.tempoMap.perfTimeToScoreTime(toPerfTime);
+    const startMeasure = Math.floor(startScoreTime / this.scoreModel.data.measureDuration) + 1;
+    for (let m = 1; m <= startMeasure; m++) {
+      this.scheduledBarlineMeasures.add(m);
+    }
+
+    const seekState = this.scoreModel.getSeekState(toPerfTime);
+    const ctx = this.audioEngine.getContext();
+    if (ctx) {
+      this.audioEngine.setPedal(seekState.pedalActive, ctx.currentTime);
+      this.audioEngine.setUnaCorda(seekState.unaCordaActive, ctx.currentTime);
+    }
 
     if (wasPlaying) {
       this.start(toPerfTime);
@@ -168,28 +193,36 @@ export class Scheduler {
       }
     }
 
-    // 2. Barline Damper Scheduling
-    const currentScoreTime = this.scoreModel.tempoMap.perfTimeToScoreTime(currentPerf);
-    const activeMeasure = Math.floor(currentScoreTime / this.scoreModel.data.measureDuration);
-    
-    if (activeMeasure !== this.lastDampedMeasure && activeMeasure > 0) {
-      const measureStartPerf = this.scoreModel.tempoMap.getMeasureStartPerf(activeMeasure + 1);
-      const hwDelta = (measureStartPerf - this.startPerfOffset) / this.playbackSpeed;
-      const damperHwTime = Math.max(currentHw, this.anchorHwTime + hwDelta);
+    // 2. Proactive Barline Damper Scheduling
+    const totalMeasures = this.scoreModel.data.totalMeasures;
+    for (let m = 2; m <= totalMeasures; m++) {
+      if (this.scheduledBarlineMeasures.has(m)) continue;
 
-      // Momentary pedal lift at barline
-      this.audioEngine.setPedal(false, damperHwTime);
-      this.audioEngine.setPedal(true, damperHwTime + 0.08);
+      const barlinePerf = this.scoreModel.tempoMap.getMeasureStartPerf(m);
+      if (barlinePerf >= currentPerf && barlinePerf < windowEndPerf) {
+        this.scheduledBarlineMeasures.add(m);
 
-      for (const cb of this.callbacks) {
-        cb.onPedalChange(false, damperHwTime);
-        cb.onPedalChange(true, damperHwTime + 0.08);
+        const hwDelta = (barlinePerf - this.startPerfOffset) / this.playbackSpeed;
+        const barlineHwTime = this.anchorHwTime + hwDelta;
+
+        // Clean barline damper clearing: lift pedal at barline, re-engage 80ms later
+        const damperLiftHwTime = Math.max(currentHw, barlineHwTime);
+        const damperReengageHwTime = barlineHwTime + 0.08;
+
+        this.audioEngine.setPedal(false, damperLiftHwTime);
+        this.audioEngine.setPedal(true, damperReengageHwTime);
+
+        for (const cb of this.callbacks) {
+          cb.onPedalChange(false, damperLiftHwTime);
+          cb.onPedalChange(true, damperReengageHwTime);
+        }
       }
-      this.lastDampedMeasure = activeMeasure;
     }
 
     // 3. Dynamic Una Corda (con sordina) Check
-    const isUnaCorda = (activeMeasure < 14) || (activeMeasure >= 65);
+    const currentScoreTime = this.scoreModel.tempoMap.perfTimeToScoreTime(currentPerf);
+    const activeMeasure = Math.floor(currentScoreTime / this.scoreModel.data.measureDuration) + 1;
+    const isUnaCorda = (activeMeasure <= 14) || (activeMeasure >= 66);
     this.audioEngine.setUnaCorda(isUnaCorda, currentHw);
 
     this.lastScheduledPerfTime = windowEndPerf;

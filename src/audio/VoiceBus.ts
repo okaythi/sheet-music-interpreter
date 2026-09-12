@@ -4,6 +4,7 @@ export const dbToGain = (db: number): number => Math.pow(10, db / 20);
 
 export class VoiceBus {
   // Acoustic Busses
+  private ctx: AudioContext;
   public readonly masterGain: GainNode;
   public readonly damperBusGain: GainNode;
   public readonly unaCordaFilter: BiquadFilterNode;
@@ -15,6 +16,7 @@ export class VoiceBus {
   private isUnaCordaEngaged = false;
 
   constructor(ctx: AudioContext) {
+    this.ctx = ctx;
     this.masterGain = ctx.createGain();
     this.masterGain.gain.value = 1.0;
 
@@ -79,10 +81,15 @@ export class VoiceBus {
     if (existing && existing.length > 0) {
       for (const oldVoice of existing) {
         try {
-          oldVoice.gain.gain.cancelScheduledValues(audioTime);
-          oldVoice.gain.gain.setValueAtTime(oldVoice.gain.gain.value, audioTime);
-          oldVoice.gain.gain.linearRampToValueAtTime(0.0001, audioTime + 0.015);
-          oldVoice.src.stop(audioTime + 0.02);
+          const effectiveTime = Math.max(this.ctx.currentTime, audioTime);
+          if (typeof (oldVoice.gain.gain as any).cancelAndHoldAtTime === 'function') {
+            (oldVoice.gain.gain as any).cancelAndHoldAtTime(effectiveTime);
+          } else {
+            oldVoice.gain.gain.cancelScheduledValues(effectiveTime);
+            oldVoice.gain.gain.setValueAtTime(Math.max(0.0001, oldVoice.gain.gain.value), effectiveTime);
+          }
+          oldVoice.gain.gain.linearRampToValueAtTime(0.0001, effectiveTime + 0.015);
+          oldVoice.src.stop(effectiveTime + 0.02);
         } catch {
           // already stopped
         }
@@ -103,12 +110,15 @@ export class VoiceBus {
     // Connect to Damper Bus
     gain.connect(this.damperBusGain);
 
+    const keyReleaseTime = audioTime + durationSec;
+
     const voice: ActiveVoice = {
       id: noteId,
       midi: midiPitch,
       src,
       gain,
       startTime: audioTime,
+      keyReleaseTime,
       scheduledStopTime: stopTime,
       isPedalHeld: this.isPedalEngaged
     };
@@ -127,18 +137,38 @@ export class VoiceBus {
   }
 
   public releaseDamperHeldVoices(audioTime: number): void {
-    const clampTime = audioTime + 0.09; // 90ms natural felt damper release
+    const effectiveAudioTime = Math.max(this.ctx.currentTime, audioTime);
+    const clampTime = effectiveAudioTime + 0.09; // 90ms natural felt damper release
 
     for (const [, voices] of this.activeVoicesByPitch.entries()) {
       for (const v of voices) {
+        // Acoustic Reality: Damper pedal release ONLY clamps strings where the key
+        // has already been released by the pianist's fingers!
+        // If the key is still physically held (or note starts in the future), the damper
+        // is physically held away from the string by the key lever mechanism.
+        if (audioTime <= v.startTime || audioTime < v.keyReleaseTime - 0.02) {
+          continue;
+        }
+
         if (v.isPedalHeld) {
           try {
-            v.gain.gain.cancelScheduledValues(audioTime);
-            v.gain.gain.setValueAtTime(v.gain.gain.value, audioTime);
+            if (typeof (v.gain.gain as any).cancelAndHoldAtTime === 'function') {
+              (v.gain.gain as any).cancelAndHoldAtTime(effectiveAudioTime);
+            } else {
+              v.gain.gain.cancelScheduledValues(effectiveAudioTime);
+              v.gain.gain.setValueAtTime(Math.max(0.0001, v.gain.gain.value), effectiveAudioTime);
+            }
             v.gain.gain.exponentialRampToValueAtTime(0.0001, clampTime);
             v.src.stop(clampTime + 0.01);
+            v.isPedalHeld = false;
           } catch {
-            // Already ended
+            try {
+              v.gain.gain.linearRampToValueAtTime(0.0001, clampTime);
+              v.src.stop(clampTime + 0.01);
+              v.isPedalHeld = false;
+            } catch {
+              // Already ended
+            }
           }
         }
       }
@@ -146,12 +176,13 @@ export class VoiceBus {
   }
 
   public killAllVoices(audioTime: number): void {
+    const effectiveAudioTime = Math.max(this.ctx.currentTime, audioTime);
     for (const [, voices] of this.activeVoicesByPitch.entries()) {
       for (const v of voices) {
         try {
-          v.gain.gain.cancelScheduledValues(audioTime);
-          v.gain.gain.setValueAtTime(0.0001, audioTime);
-          v.src.stop(audioTime + 0.005);
+          v.gain.gain.cancelScheduledValues(effectiveAudioTime);
+          v.gain.gain.setValueAtTime(0.0001, effectiveAudioTime);
+          v.src.stop(effectiveAudioTime + 0.005);
         } catch {
           // Already stopped
         }

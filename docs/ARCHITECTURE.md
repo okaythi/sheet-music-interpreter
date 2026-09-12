@@ -59,11 +59,12 @@ The **Sheet Music Interpreter** is a zero-dependency, library-grade classical no
   * Operates a 25ms `setInterval` lookahead loop querying notes $120\text{ms}$ into the future.
   * Calculates exact hardware timestamps:
     $$\text{hwTime} = \text{anchorHwTime} + \frac{\text{notePerfStart} - \text{startPerfOffset}}{\text{playbackSpeed}}$$
+  * **Proactive Lookahead Barline Damper:** Rather than reactive measure polling, barlines within the lookahead window are queued with exact hardware timestamps. Pedal lift clears previous measures at the barline while re-engaging 80ms later.
   * Compensates for `AudioContext.outputLatency` (Bluetooth/OS buffer delays) so visual playheads match acoustic sound arriving at the listener's ears.
 * **`VoiceBus.ts` (Acoustic Authority):**
-  * **Damper Bus:** Held notes ring until natural key decay OR until damper pedal lifts. When damper lifts, all pedal-held voices clamp simultaneously in $90\text{ms}$.
-  * **Una Corda Bus:** Soft pedal shifts hammer strike timbre via dynamic lowpass filter cutoff ($2.4\text{kHz}$) and $-2\text{dB}$ gain attenuation.
-  * **Re-strike Crossfader:** When the same pitch is struck again while ringing under pedal, crossfades the old voice down in $15\text{ms}$ to prevent acoustic clicks.
+  * **Damper Bus & Key-Held Immunity:** Models acoustic grand piano key levers vs damper rail. When the sustain pedal lifts, `releaseDamperHeldVoices` damps *only* strings whose keys have already been released by the fingers (`audioTime >= keyReleaseTime - 0.02`). Active notes and upcoming beat 1 chords are physically immune to barline damper lifts and continue ringing.
+  * **Una Corda Bus:** Soft pedal shifts hammer strike timbre via dynamic lowpass filter cutoff ($2.8\text{kHz}$) and calibrated $-2.2\text{dB}$ gain attenuation (`dbToGain`).
+  * **Re-strike Crossfader:** When the same pitch is struck again while ringing under pedal, crossfades the old voice down in $15\text{ms}$ using `cancelAndHoldAtTime` to prevent acoustic clicks.
 * **`AudioEngine.ts`:**
   * Concurrency-limited streaming queue for 39 acoustic grand piano samples.
   * Semitone pitch transposition via `playbackRate = 2^((targetMidi - anchorMidi) / 12)`.

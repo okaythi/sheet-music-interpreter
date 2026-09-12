@@ -89,6 +89,7 @@ export interface ActiveVoice {
   gain: GainNode;
   filter?: BiquadFilterNode;
   startTime: number;
+  keyReleaseTime: number;
   scheduledStopTime: number;
   isPedalHeld: boolean;
 }
