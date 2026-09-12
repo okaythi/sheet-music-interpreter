@@ -88,3 +88,47 @@ Debussy marked Measure 1 with *"pp con sordina"*.
 The engine models these as **separate acoustic authorities**:
 * A global **Damper Bus** (`damperBusGain`) handles ringing release clamps.
 * An **Una Corda Bus** (`unaCordaFilter` + `unaCordaGain`) applies lowpass frequency cuts and gain attenuation.
+
+---
+
+## 6. The Clef Distortion Defect (Hand-Traced Béziers vs Real Outlines)
+
+### What Happened
+In early SVG prototypes, clefs were authored using a single hand-traced continuous Bézier path string. Under tight manual curvature, ribbon boundaries crossed or bunched together, producing irregular "blobs" rather than classical engraving loops.
+
+### The Fix
+Replaced hand-traced approximations with canonical standard classical vector path data (`#authentic-gclef` and `#authentic-fclef`), precisely aligned to the G4 staff line ($Y = 60$) and F3 staff line ($Y = 140$).
+
+---
+
+## 7. The Truncated Notes Defect: Fixed ViewBox vs Dynamic System Bounds
+
+### What Happened
+Inspection across all 1,680 notes revealed that **151 notes** were partially or completely clipped by the browser. Noteheads and ledgers ranged from $Y = -33$ (high treble melody) to $Y = 273$ (deep Coda bass chords). Because the SVG container used a fixed `viewBox="0 0 1020 200"` with `overflow: hidden`, notes in high or low registers were literally sliced off by the canvas boundary.
+
+### The Fix: Dynamic System ViewBox
+Rather than distorting the composition via dynamic $8^{va}$ insertion (which violates multi-voice polyphony and Urtext fidelity), `NotePresenter.loadSystem()` now dynamically inspects the active system's ledger lines and stems:
+$$Y_{\text{start}} = \min(-15, Y_{\min} - 15), \quad H_{\text{total}} = \max(200, Y_{\max} + 20) - Y_{\text{start}}$$
+The SVG `viewBox` dynamically expands per system, completely eliminating clipping.
+
+---
+
+## 8. The Playhead Sync Defect: Linear Pixel Math vs Note-Bracketed Interpolation
+
+### What Happened
+The early playhead cursor advanced strictly linearly in time across measure widths ($156 \to 580 \to 1010$). However, actual note placement used a separate formula ($395\text{px} + 12\text{px}$ offset) and non-linear duration-proportional spacing. Two parallel layout calculations caused the playhead to visibly lead or lag note strikes within measures.
+
+### The Fix: Note-Bracketed Interpolation
+`NotePresenter` precomputes layout anchors `{ time, x }` directly from the rendered notes. At each frame, the playhead binary-searches the bracketing notes and interpolates between their actual rendered X coordinates:
+$$\text{headX} = X_{\text{left}} + \frac{t - t_{\text{left}}}{t_{\text{right}} - t_{\text{left}}} \cdot (X_{\text{right}} - X_{\text{left}})$$
+The playhead is now mathematically guaranteed to be centered directly over each note at attack time.
+
+---
+
+## 9. Cascading Gain Attenuation & `dbToGain` Staging
+
+### What Happened
+The voice envelope ($0.85 \to 0.38$) compounded multiplicatively across the damper bus ($1.0$), una corda gain ($0.78$), and una corda lowpass filter ($2.4\text{kHz}$), resulting in a $-10.6\text{dB}$ drop during the opening 14 measures (*pp con sordina*) that left notes overly quiet and muffled.
+
+### The Fix
+Introduced standard conversion `dbToGain(db) = 10^(db/20)`, calibrated una corda attenuation to a gentle $-2.2\text{dB}$, tuned filter cutoff to $2.8\text{kHz}$, and raised voice envelope attack peak to $0.92$ and sustain shelf to $0.48$.

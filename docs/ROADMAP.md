@@ -57,3 +57,17 @@ Expand beyond *Clair de lune* to masterworks across diverse stylistic idioms:
 2. **Frédéric Chopin:** *Nocturnes* (Op. 9 No. 2 in E♭, Op. 48 No. 1 in C minor), *Ballade No. 1 in G minor*, Op. 23.
 3. **Erik Satie:** *Gymnopédies* and *Gnossiennes*.
 4. **Maurice Ravel:** *Pavane pour une infante défunte*.
+
+---
+
+## Architecture Tenet: Universal Multi-Timing Support
+As specified in the core design, the final engine must support all three timing models for every piece in the repertoire:
+1. **Expressive Rubato (Default):** Musically interpreted sectional rubato curves matching the composer's expressive markings.
+2. **Strict Metronome Mode:** Exact quantized clockwork playback for analytical study, practice, and rhythm verification.
+3. **Acoustic Recording Alignment (DTW):** Alignment with historic master performances.
+
+## Architecture Tenet: Octave Shift (<octave-shift>) vs Dynamic 8va
+Dynamic, automated 8va injection based on note coordinate thresholds is explicitly rejected to preserve multi-voice polyphonic integrity (preventing voice collisions between high melody and lower accompaniment on the same staff) and Urtext fidelity. The engine relies on:
+1. Semantic `<octave-shift>` elements directly from the score MusicXML for authentic spanners.
+2. Dynamic system `viewBox` height expansion to comfortably accommodate ledger lines without clipping.
+

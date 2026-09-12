@@ -73,10 +73,13 @@ The **Sheet Music Interpreter** is a zero-dependency, library-grade classical no
 
 * **`SvgRenderer.ts`:**
   * Grand Staff geometry (upper treble staff $y=36\dots68$, lower staff $y=132\dots164$).
-  * Authentic SMuFL vector clef definitions (`#authentic-gclef`, `#authentic-fclef`).
+  * Authentic standard classical vector clef definitions (`#authentic-gclef`, `#authentic-fclef`), replacing distorted hand-traced approximations.
   * Dynamic clef switching: Lower staff renders G-clef for Bars 1–5, transitioning to F-clef on System 3 (Measure 6).
 * **`NotePresenter.ts`:**
-  * Manages SVG note groups, ledger lines, ties, and playhead cursor.
+  * **Dynamic System ViewBox:** Computes true vertical extents across all noteheads, stems, and ledger lines per system, dynamically expanding the SVG `viewBox` (e.g., $Y \in [-35, 275]$) to permanently eliminate clipping on high treble and deep bass chords.
+  * **Note-Bracketed Playhead Interpolation:** Replaces brittle linear pixel-per-measure math with piecewise interpolation between the actual rendered notehead coordinates bracketing the current score time:
+    $$\text{headX} = X_{\text{prev}} + \frac{t - t_{\text{prev}}}{t_{\text{next}} - t_{\text{prev}}} \cdot (X_{\text{next}} - X_{\text{prev}})$$
+    This ensures that when $t = t_{\text{note}}$, the playhead is mathematically dead-center over the notehead.
   * Employs strict DOM attribute diffing (`if (h.lastState !== state)`) to eliminate DOM churn during 60 FPS animation.
 
 ### 2.4 Ingestion & Compiler Layer (`src/compiler/`)

@@ -1,5 +1,7 @@
 import type { ActiveVoice } from '../types/index.js';
 
+export const dbToGain = (db: number): number => Math.pow(10, db / 20);
+
 export class VoiceBus {
   // Acoustic Busses
   public readonly masterGain: GainNode;
@@ -49,8 +51,8 @@ export class VoiceBus {
     if (this.isUnaCordaEngaged === engaged) return;
     this.isUnaCordaEngaged = engaged;
 
-    const targetFreq = engaged ? 2400 : 20000;
-    const targetGain = engaged ? 0.78 : 1.0;
+    const targetFreq = engaged ? 2800 : 20000;
+    const targetGain = engaged ? dbToGain(-2.2) : 1.0;
 
     this.unaCordaFilter.frequency.cancelScheduledValues(audioTime);
     this.unaCordaFilter.frequency.setValueAtTime(this.unaCordaFilter.frequency.value, audioTime);
@@ -90,8 +92,8 @@ export class VoiceBus {
 
     // 2. Setup natural piano attack and decay envelopes
     // Initial attack to natural release
-    gain.gain.setValueAtTime(0.85, audioTime);
-    gain.gain.exponentialRampToValueAtTime(0.38, audioTime + Math.min(1.2, durationSec * 0.8));
+    gain.gain.setValueAtTime(0.92, audioTime);
+    gain.gain.exponentialRampToValueAtTime(0.48, audioTime + Math.min(1.2, durationSec * 0.8));
     
     // Natural ring-out time (longer if pedal is down)
     const decayDuration = this.isPedalEngaged ? 5.5 : Math.max(durationSec + 0.5, 1.8);

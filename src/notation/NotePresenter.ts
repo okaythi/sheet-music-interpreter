@@ -11,6 +11,7 @@ export class NotePresenter {
 
   private activeHandles: NoteHandle[] = [];
   private currentSystemId = -1;
+  private timeAnchors: Array<{ time: number; x: number }> = [];
 
   constructor(svgElement: SVGSVGElement) {
     this.container = svgElement;
@@ -19,7 +20,7 @@ export class NotePresenter {
       <g id="backdrop-layer"></g>
       <g id="notes-layer"></g>
       <!-- Visual Playhead Cursor -->
-      <line id="playhead" x1="156" y1="20" x2="156" y2="190" stroke="#FF7744" stroke-width="1.8" opacity="0.4" style="transition: opacity 0.2s;" />
+      <line id="playhead" x1="156" y1="-20" x2="156" y2="220" stroke="#FF7744" stroke-width="1.8" opacity="0.4" style="transition: opacity 0.2s;" />
       <!-- Continuous Pedal Lines -->
       <line id="pedal-m1-line" x1="156" y1="184" x2="570" y2="184" stroke="rgba(233, 84, 32, 0.2)" stroke-width="2" />
       <line id="pedal-m2-line" x1="582" y1="184" x2="996" y2="184" stroke="rgba(233, 84, 32, 0.2)" stroke-width="2" />
@@ -38,11 +39,54 @@ export class NotePresenter {
 
   /**
    * Render System SVG Elements & Cache DOM Handles
-   * SAFEGUARD: Strictly decoupled from animation and audio triggers.
+   * Dynamic ViewBox: Expands vertical canvas to prevent high treble & low bass clipping.
    */
   public loadSystem(sys: ScoreSystem, notes: ScoreNote[]): void {
     this.currentSystemId = sys.id;
     this.activeHandles = [];
+
+    // 1. Dynamic ViewBox calculation based on ledger lines and stems
+    let minY = 36;
+    let maxY = 164;
+    for (const n of notes) {
+      minY = Math.min(minY, n.y);
+      maxY = Math.max(maxY, n.y);
+      if (n.stemUp) {
+        minY = Math.min(minY, n.y - 25);
+      } else {
+        maxY = Math.max(maxY, n.y + 25);
+      }
+      if (n.ledgers && n.ledgers.length > 0) {
+        for (const ly of n.ledgers) {
+          minY = Math.min(minY, ly - 4);
+          maxY = Math.max(maxY, ly + 4);
+        }
+      }
+    }
+
+    const yStart = Math.min(-15, minY - 15);
+    const yEnd = Math.max(200, maxY + 20);
+    const totalHeight = yEnd - yStart;
+
+    this.container.setAttribute('viewBox', `0 ${yStart.toFixed(1)} 1020 ${totalHeight.toFixed(1)}`);
+    this.playheadLine.setAttribute('y1', `${yStart.toFixed(1)}`);
+    this.playheadLine.setAttribute('y2', `${yEnd.toFixed(1)}`);
+
+    // 2. Precompute note-bracketed playhead anchors
+    const anchorMap = new Map<number, number>();
+    anchorMap.set(sys.startSec, 156);
+    anchorMap.set(sys.startSec + (sys.endSec - sys.startSec) / 2, 580);
+    anchorMap.set(sys.endSec, 1000);
+
+    for (const n of notes) {
+      if (!anchorMap.has(n.start) || anchorMap.get(n.start)! > n.x) {
+        anchorMap.set(n.start, n.x);
+      }
+    }
+
+    this.timeAnchors = Array.from(anchorMap.entries())
+      .map(([time, x]) => ({ time, x }))
+      .sort((a, b) => a.time - b.time);
 
     // Render static Grand Staff backdrop
     this.backdropGroup.innerHTML = SvgRenderer.renderBackdrop(sys);
@@ -181,17 +225,35 @@ export class NotePresenter {
       }
     }
 
-    // 2. Playhead cursor advancement
-    const sysTime = scoreTime - sysStartScore;
+    // 2. Playhead cursor advancement via Note-Bracketed Interpolation
     let headX = 156;
-    if (sysTime <= 0) {
-      headX = 156;
-    } else if (sysTime <= measureDur) {
-      headX = 156 + (sysTime / measureDur) * (580 - 156);
-    } else if (sysTime <= measureDur * 2) {
-      headX = 580 + ((sysTime - measureDur) / measureDur) * (1010 - 580);
-    } else {
-      headX = 1010;
+    if (this.timeAnchors.length > 0) {
+      if (scoreTime <= this.timeAnchors[0].time) {
+        headX = this.timeAnchors[0].x;
+      } else if (scoreTime >= this.timeAnchors[this.timeAnchors.length - 1].time) {
+        headX = this.timeAnchors[this.timeAnchors.length - 1].x;
+      } else {
+        // Binary search for bracketing anchors
+        let low = 0;
+        let high = this.timeAnchors.length - 2;
+        let leftIdx = 0;
+
+        while (low <= high) {
+          const mid = Math.floor((low + high) / 2);
+          if (this.timeAnchors[mid].time <= scoreTime) {
+            leftIdx = mid;
+            low = mid + 1;
+          } else {
+            high = mid - 1;
+          }
+        }
+
+        const left = this.timeAnchors[leftIdx];
+        const right = this.timeAnchors[leftIdx + 1];
+        const span = right.time - left.time;
+        const frac = span > 0 ? (scoreTime - left.time) / span : 0;
+        headX = left.x + frac * (right.x - left.x);
+      }
     }
 
     this.playheadLine.setAttribute('x1', headX.toFixed(1));
@@ -199,6 +261,7 @@ export class NotePresenter {
     this.playheadLine.setAttribute('opacity', isPlaying ? '0.85' : '0.35');
 
     // 3. Pedal line active indicators
+    const sysTime = scoreTime - sysStartScore;
     if (this.pedalM1Line && this.pedalM2Line) {
       const m1Active = pedalActive && (sysTime >= 0.4 && sysTime < measureDur);
       const m2Active = pedalActive && (sysTime >= measureDur && sysTime < measureDur * 2);
